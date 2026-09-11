@@ -45,17 +45,17 @@ export async function runDoctor(): Promise<CheckResult[]> {
     } catch {
       // Version detection failed, but Chrome exists
     }
-    results.push({ name: 'Chrome', status: 'ok', message: `Found at ${chromePath}${versionInfo}` });
+    results.push({ name: 'Browser', status: 'ok', message: `Found at ${chromePath}${versionInfo}` });
   } else {
     results.push({
-      name: 'Chrome',
+      name: 'Browser',
       status: 'fail',
-      message: 'Google Chrome not found',
+      message: 'No Chromium-based browser found (Chrome, Thorium, Brave, Chromium, Edge, Vivaldi)',
       fix: os === 'win32'
-        ? 'Install from https://www.google.com/chrome/'
+        ? 'Install from https://www.google.com/chrome/ or https://thorium.rocks/'
         : os === 'darwin'
-          ? 'Install: brew install --cask google-chrome'
-          : 'Install: sudo apt install google-chrome-stable  OR  sudo dnf install google-chrome-stable',
+          ? 'Install: brew install --cask google-chrome  OR  brew install --cask brave-browser'
+          : 'Install a Chromium-based browser, e.g.: google-chrome, thorium-browser, chromium, brave',
     });
   }
 
@@ -121,7 +121,13 @@ export function findChromePath(): string | undefined {
     const paths = [
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
       '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Thorium.app/Contents/MacOS/Thorium',
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Vivaldi.app/Contents/MacOS/Vivaldi',
       `${process.env.HOME}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
+      `${process.env.HOME}/Applications/Thorium.app/Contents/MacOS/Thorium`,
+      `${process.env.HOME}/Applications/Brave Browser.app/Contents/MacOS/Brave Browser`,
     ];
     for (const p of paths) {
       if (existsSync(p)) return p;
@@ -129,23 +135,40 @@ export function findChromePath(): string | undefined {
   }
 
   if (os === 'linux') {
-    const paths = [
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/snap/bin/chromium',
+    const user = process.env.USER || 'youssef';
+    const home = process.env.HOME || `/home/${user}`;
+
+    const candidates = [
+      'google-chrome', 'google-chrome-stable',
+      'thorium-browser', 'thorium',
+      'chromium', 'chromium-browser',
+      'brave-browser', 'brave',
+      'microsoft-edge', 'microsoft-edge-stable',
+      'vivaldi', 'vivaldi-stable',
+      'ungoogled-chromium',
     ];
+
+    const paths = [
+      // Standard distro bins
+      ...candidates.map(c => `/usr/bin/${c}`),
+      '/snap/bin/chromium',
+      // Nix/NixOS user & system profiles
+      ...candidates.map(c => `${home}/.nix-profile/bin/${c}`),
+      ...candidates.map(c => `/etc/profiles/per-user/${user}/bin/${c}`),
+      ...candidates.map(c => `/run/current-system/sw/bin/${c}`),
+    ];
+
     for (const p of paths) {
       if (existsSync(p)) return p;
     }
-    // Try which
-    try {
-      return execSync('which google-chrome || which chromium || which chromium-browser', {
-        encoding: 'utf-8',
-      }).trim();
-    } catch {
-      // Not found
+    // Try which — covers NixOS and other distros with non-standard PATH-based installs
+    for (const bin of candidates) {
+      try {
+        const p = execSync(`which ${bin}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+        if (p) return p;
+      } catch {
+        // not found, try next
+      }
     }
   }
 

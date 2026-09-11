@@ -22,7 +22,7 @@ import type { BaseProvider } from './core/provider.js';
 import { homedir, platform } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { runDoctor, printDoctorResults, findChromePath } from './doctor.js';
 
@@ -62,18 +62,18 @@ async function findAvailablePort(preferred: number, host: string): Promise<numbe
   throw new Error(`No available port found in range ${preferred}-${preferred + 99}`);
 }
 
-/** Check if Chrome is running (any instance) */
+/** Check if a Chromium-based browser is running (any instance) */
 function isChromeRunning(): boolean {
   try {
     const os = platform();
     if (os === 'darwin') {
-      execSync('pgrep -x "Google Chrome"', { stdio: 'ignore' });
+      execSync('pgrep -x "Google Chrome|Thorium|Brave Browser|Chromium|Microsoft Edge|Vivaldi"', { stdio: 'ignore' });
       return true;
     } else if (os === 'win32') {
       const out = execSync('tasklist /FI "IMAGENAME eq chrome.exe" /NH', { encoding: 'utf-8' });
       return out.includes('chrome.exe');
     } else {
-      execSync('pgrep -x "chrome|chromium|google-chrome"', { stdio: 'ignore' });
+      execSync('pgrep -x "chrome|chromium|google-chrome|thorium|thorium-browser|brave|brave-browser|msedge|vivaldi"', { stdio: 'ignore' });
       return true;
     }
   } catch {
@@ -98,17 +98,19 @@ async function launchChromeWithCDP(cdpPort: number, profileDir: string): Promise
 
   // Must use non-default profile dir — Chrome refuses CDP on default profile
   mkdirSync(profileDir, { recursive: true });
-  const args = `--remote-debugging-port=${cdpPort} --user-data-dir="${profileDir}" --no-first-run --no-default-browser-check`;
+  const args = [
+    `--remote-debugging-port=${cdpPort}`,
+    `--user-data-dir=${profileDir}`,
+    '--no-first-run',
+    '--no-default-browser-check'
+  ];
 
   try {
-    const os = platform();
-    if (os === 'darwin') {
-      execSync(`"${chromePath}" ${args} &>/dev/null &`, { shell: '/bin/zsh' });
-    } else if (os === 'win32') {
-      execSync(`start "" "${chromePath}" ${args}`, { shell: 'cmd.exe' });
-    } else {
-      execSync(`"${chromePath}" ${args} &>/dev/null &`, { shell: '/bin/bash' });
-    }
+    const child = spawn(chromePath, args, {
+      detached: true,
+      stdio: 'ignore'
+    });
+    child.unref();
 
     // Wait for CDP to become available (up to 10 seconds)
     for (let i = 0; i < 20; i++) {

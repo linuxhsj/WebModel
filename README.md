@@ -11,7 +11,7 @@ Use Claude, ChatGPT, DeepSeek, and 8 more AI models — completely free, zero AP
 [TypeScript](https://www.typescriptlang.org/)
 [Tests](#testing)
 
-[Quick Start](#quick-start) · [Supported Models](#supported-models) · [Configuration](#configuration) · [API Reference](#api-reference) · [Contributing](#contributing)
+[Quick Start](#quick-start) · [Supported Models](#supported-models) · [Configuration](#configuration) · [API Reference](#api-reference) · [Nix / NixOS](#nix--nixos) · [Contributing](#contributing)
 
 
 
@@ -248,6 +248,87 @@ curl http://localhost:3456/v1/messages \
 │  Logged into AI websites     │
 └──────────────────────────────┘
 ```
+
+## Nix / NixOS
+
+The flake exposes a package, an overlay, and a home-manager module.
+
+### Try it without installing
+
+```bash
+nix run github:linuxhsj/WebModel
+```
+
+### Add to your flake
+
+```nix
+# flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    web-model-bridge = {
+      url = "github:linuxhsj/WebModel";
+      inputs.nixpkgs.follows = "nixpkgs"; # reuse your nixpkgs — no extra instance
+    };
+  };
+
+  outputs = { nixpkgs, home-manager, web-model-bridge, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        # 1. Inject the overlay so pkgs.web-model-bridge is available everywhere
+        { nixpkgs.overlays = [ web-model-bridge.overlays.default ]; }
+
+        home-manager.nixosModules.home-manager
+        {
+          home-manager.users.alice = {
+            imports = [ web-model-bridge.homeManagerModules.default ];
+
+            # 2. Enable the module — the package comes from pkgs via the overlay
+            programs.web-model-bridge = {
+              enable  = true;
+              port    = 3456;        # default
+              host    = "127.0.0.1"; # default
+              # configFile = ./webmodel.yml;   # optional YAML config
+              # extraArgs  = [ "--no-open" ];  # optional extra CLI flags
+            };
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+The home-manager module:
+- Adds `web-model-bridge` to `home.packages` (binary in `$PATH`)
+- Creates a **systemd user service** (`systemctl --user start web-model-bridge`) that auto-starts the server on login
+
+### Available module options
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enable` | bool | `false` | Enable the module |
+| `package` | package | `pkgs.web-model-bridge` | Override the package |
+| `port` | port | `3456` | Listening port |
+| `host` | string | `"127.0.0.1"` | Bind address |
+| `configFile` | path \| null | `null` | Path to YAML config file |
+| `extraArgs` | list of string | `[]` | Extra CLI arguments |
+
+### Just the overlay (without home-manager)
+
+```nix
+{ nixpkgs.overlays = [ web-model-bridge.overlays.default ]; }
+
+# then anywhere in your config:
+environment.systemPackages = [ pkgs.web-model-bridge ];
+```
+
+---
 
 ## Troubleshooting
 
