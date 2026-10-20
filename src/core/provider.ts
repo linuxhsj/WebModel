@@ -1,4 +1,5 @@
 import type { StreamEvent } from './stream.js';
+import { renderToolsPrompt } from './tool-protocol.js';
 
 export interface ProviderInfo {
   id: string;
@@ -35,6 +36,8 @@ export interface ChatRequest {
   messages: Message[];
   stream: boolean;
   tools?: ToolDef[];
+  /** Client asked for extended thinking (Anthropic `thinking` enabled/adaptive). */
+  thinking?: boolean;
   signal?: AbortSignal;
 }
 
@@ -47,6 +50,17 @@ export abstract class BaseProvider {
   abstract models(): Promise<ModelInfo[]>;
   abstract chat(req: ChatRequest): AsyncIterable<StreamEvent>;
 }
+
+// Script-aware estimate: Latin runs ~0.3 tokens per char (chars/4 is within 20%
+// of a real BPE tokenizer), but CJK and Hangul are ~0.6 per char, so chars/4
+// halved every Chinese or Korean reply and Claude Code's meter read half the cost.
+// ponytail: heuristic, not a tokenizer; swap in one if the count must be exact.
+const CJK = /[\u1100-\u11FF\u3000-\u9FFF\uAC00-\uD7AF\uF900-\uFAFF\uFF00-\uFFEF]/g;
+export const estimateTokens = (...texts: string[]): number =>
+  Math.ceil(texts.reduce((n, t) => {
+    const cjk = t.match(CJK)?.length ?? 0;
+    return n + (t.length - cjk) / 4 + cjk * 0.6;
+  }, 0));
 
 /**
  * Extract plain text from message content, handling both string and
@@ -76,7 +90,11 @@ export function extractText(content: string | unknown): string {
  * 3. Keep assistant messages for multi-turn context
  * 4. Return a clean prompt string
  */
-export function buildWebPrompt(messages: Message[]): string {
+export function buildWebPrompt(messages: Message[], tools?: ToolDef[]): string {
+  // Agent clients (Anthropic route, e.g. Claude Code) always pass `tools`, maybe empty.
+  // Every web request opens a fresh chat, so they need the whole transcript.
+  if (tools) return buildTranscript(messages, tools);
+
   const parts: string[] = [];
 
   for (const msg of messages) {
@@ -100,6 +118,25 @@ export function buildWebPrompt(messages: Message[]): string {
   // Return only the last user exchange (last user message + any preceding assistant)
   // to avoid sending the entire conversation history to web models
   return parts.length > 0 ? parts[parts.length - 1] : '';
+}
+
+function buildTranscript(messages: Message[], tools: ToolDef[]): string {
+  // Leading system messages form the header; later ones (Claude Code sends hook
+  // output and MCP instructions mid-conversation) stay where they were sent.
+  const firstTurn = messages.findIndex(m => m.role !== 'system');
+  const header = firstTurn < 0 ? messages : messages.slice(0, firstTurn);
+  const turns = firstTurn < 0 ? [] : messages.slice(firstTurn);
+  const system = header.map(m => extractText(m.content)).filter(Boolean).join('\n\n');
+  const parts: string[] = [];
+  if (system) parts.push(`<system>\n${system}\n</system>`);
+  if (tools.length) parts.push(renderToolsPrompt(tools));
+  parts.push('# Conversation');
+  for (const msg of turns) {
+    const text = extractText(msg.content);
+    if (text) parts.push(`[${msg.role}]\n${text}`);
+  }
+  parts.push('Continue as [assistant]: write only your next assistant message.');
+  return parts.join('\n\n');
 }
 
 /**

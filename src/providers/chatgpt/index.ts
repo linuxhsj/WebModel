@@ -55,7 +55,7 @@ export class ChatGPTProvider extends BaseProvider {
           model: req.model,
           messages: [{
             author: { role: 'user' },
-            content: { content_type: 'text', parts: [buildWebPrompt(req.messages)] },
+            content: { content_type: 'text', parts: [buildWebPrompt(req.messages, req.tools)] },
           }],
         }),
       }

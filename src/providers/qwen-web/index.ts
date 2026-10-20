@@ -79,7 +79,7 @@ export class QwenProvider extends BaseProvider {
       }
 
       // Step 2: Build message
-      const prompt = buildWebPrompt(req.messages);
+      const prompt = buildWebPrompt(req.messages, req.tools);
 
       const modelMap: Record<string, string> = {
         'qwen-3.5-plus': 'qwen3.5-plus',

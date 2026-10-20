@@ -17,11 +17,12 @@ export interface TestContext {
 export function createTestContext(opts?: {
   authToken?: string;
   providers?: MockProvider[];
+  fallbackModel?: string;
 }): TestContext {
   const stateDir = join(tmpdir(), `wmb-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(stateDir, { recursive: true });
 
-  const registry = new ProviderRegistry();
+  const registry = new ProviderRegistry(opts?.fallbackModel);
   const authStore = new AuthStore(stateDir);
 
   const providers = opts?.providers ?? [

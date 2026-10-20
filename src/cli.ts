@@ -246,7 +246,7 @@ program
     });
 
     // ── Step 4: Register providers ──
-    const registry = new ProviderRegistry();
+    const registry = new ProviderRegistry(config.providers.fallbackModel);
     const authStore = new AuthStore(stateDir);
 
     const browserFetch = (url: string, init: RequestInit) =>

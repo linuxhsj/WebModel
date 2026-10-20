@@ -19,7 +19,8 @@ export interface BridgeConfig {
   };
   providers: {
     enabled: string[];
-    defaultModel: string;
+    /** Serves requests for a model no provider has; null answers them 400 invalid_model. */
+    fallbackModel: string | null;
   };
   toolCalling: {
     enabled: boolean;
@@ -53,7 +54,7 @@ export function defaultConfig(stateDir: string): BridgeConfig {
         'kimi-web', 'qwen-web', 'glm-web', 'grok-web',
         'gemini-web', 'perplexity-web', 'doubao-web', 'xiaomimo-web',
       ],
-      defaultModel: 'claude-web/claude-sonnet-4-6',
+      fallbackModel: null,
     },
     toolCalling: {
       enabled: true,
@@ -108,6 +109,7 @@ export function loadConfig(opts: LoadOptions): BridgeConfig {
   if (process.env.WMB_HOST) config.server.host = process.env.WMB_HOST;
   if (process.env.WMB_AUTH_TOKEN) config.server.authToken = process.env.WMB_AUTH_TOKEN;
   if (process.env.WMB_LOG_LEVEL) config.logging.level = process.env.WMB_LOG_LEVEL as any;
+  if (process.env.WMB_FALLBACK_MODEL) config.providers.fallbackModel = process.env.WMB_FALLBACK_MODEL;
   if (process.env.WMB_STATE_DIR) {
     config.browser.profileDir = join(process.env.WMB_STATE_DIR, 'chrome-profile');
     config.logging.file = join(process.env.WMB_STATE_DIR, 'logs', 'bridge.log');

@@ -6,6 +6,43 @@ import { DEEPSEEK_WEB_BASE_URL } from './client.js';
 import { AuthStore } from '../../auth/store.js';
 import type { Page } from 'playwright-core';
 
+/** HTTP 200 envelope DeepSeek wraps every reply in. */
+interface SessionCreateEnvelope {
+  code?: number;
+  msg?: string;
+  data?: {
+    biz_code?: number;
+    biz_msg?: string;
+    biz_data?: { chat_session?: { id?: string } };
+  };
+}
+
+interface SessionCreateReply {
+  data?: SessionCreateEnvelope;
+  error?: string;
+}
+
+type SessionCreateResult =
+  | { kind: 'ok'; sessionId: string }
+  | { kind: 'error'; message: string }
+  | { kind: 'malformed' };
+
+/**
+ * DeepSeek answers HTTP 200 even on failure: {code:0, data:{biz_code:0,
+ * biz_data:{chat_session:{id}}}} on success (2026-10-20 shape); {code:40003,
+ * msg:"INVALID_TOKEN", data:null} on auth failure.
+ */
+function sessionCreateResult(reply: SessionCreateReply): SessionCreateResult {
+  if (reply.error) return { kind: 'error', message: reply.error };
+  const envelope = reply.data;
+  const errorCode = envelope?.data?.biz_code ?? envelope?.code;
+  if (errorCode) {
+    return { kind: 'error', message: `${errorCode}: ${envelope?.data?.biz_msg || envelope?.msg || 'unknown error'}` };
+  }
+  const sessionId = envelope?.data?.biz_data?.chat_session?.id;
+  return sessionId ? { kind: 'ok', sessionId } : { kind: 'malformed' };
+}
+
 export class DeepSeekProvider extends BaseProvider {
   readonly info: ProviderInfo = {
     id: 'deepseek-web',
@@ -104,15 +141,19 @@ export class DeepSeekProvider extends BaseProvider {
             const text = await res.text();
             return { error: `HTTP ${res.status}: ${text.substring(0, 200)}` };
           }
-          const data = await res.json();
-          return { sessionId: data?.data?.biz_data?.id || data?.data?.id };
+          return { data: await res.json() };
         } catch (e: any) {
           return { error: e.message };
         }
       }, bearer);
+      const session = sessionCreateResult(sessionResult);
 
-      if (sessionResult.error || !sessionResult.sessionId) {
-        yield { type: 'error', message: `DeepSeek session create failed: ${sessionResult.error || 'no session id'}` };
+      if (session.kind === 'error') {
+        yield { type: 'error', message: `DeepSeek session create failed: ${session.message}` };
+        return;
+      }
+      if (session.kind === 'malformed') {
+        yield { type: 'error', message: 'DeepSeek session create failed: no session id' };
         return;
       }
 
@@ -153,9 +194,9 @@ export class DeepSeekProvider extends BaseProvider {
       }
 
       // Step 5: Build prompt
-      const prompt = buildWebPrompt(req.messages);
+      const prompt = buildWebPrompt(req.messages, req.tools);
 
-      const isThinking = req.model.includes('reasoner');
+      const isThinking = req.thinking || req.model.includes('reasoner');
 
       // Step 6: Send message with PoW header, read SSE
       const sseResult = await page.evaluate(async (args: {
@@ -202,7 +243,7 @@ export class DeepSeekProvider extends BaseProvider {
           return { error: e.message };
         }
       }, {
-        sessionId: sessionResult.sessionId,
+        sessionId: session.sessionId,
         prompt,
         powResponse,
         thinkingEnabled: isThinking,
@@ -221,8 +262,30 @@ export class DeepSeekProvider extends BaseProvider {
       //   {"v":"!"} — short form append (continues previous path)
       //   {"p":"response/status","v":"FINISHED"} — status update
       //   {"p":"response/thinking_content","o":"APPEND","v":"..."} — thinking
+      // Newer replies are a list of fragments: a THINK fragment (reasoning, when thinking is
+      // enabled) then a RESPONSE fragment appended via {"p":"response/fragments","o":"APPEND",
+      // "v":[{type, content}]}. Content patches address a fragment by index, so track their types.
+      const fragmentTypes: string[] = [];
+      const fragmentDelta = (type: string | undefined, delta: string): StreamEvent =>
+        type === 'THINK' ? { type: 'thinking_delta', delta } : { type: 'text_delta', delta };
+      // Content already yielded per fragment: a SET patch replaces the fragment, so emit
+      // only its unseen tail instead of duplicating what streamed before it. A SET that
+      // contradicts what was sent can't be retracted and is dropped.
+      const emitted: string[] = [];
+      const emitFragment = (index: number, type: string | undefined, content: string, op?: string): StreamEvent | null => {
+        const prev = emitted[index] ?? '';
+        if (op === 'SET') {
+          if (!content.startsWith(prev)) return null;
+          emitted[index] = content;
+          const delta = content.slice(prev.length);
+          return delta.length > 0 ? fragmentDelta(type, delta) : null;
+        }
+        emitted[index] = prev + content;
+        return content.length > 0 ? fragmentDelta(type, content) : null;
+      };
       const lines = (sseResult.data ?? '').split('\n');
       let lastPath = '';
+      let sawSnapshot = false;
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('event:')) continue;
@@ -234,14 +297,50 @@ export class DeepSeekProvider extends BaseProvider {
         try {
           const parsed = JSON.parse(raw);
 
-          // Full response object (initial WIP state) — skip, wait for patches
-          if (parsed?.v?.response) continue;
+          // Full response object (initial WIP state). DeepSeek ships the first
+          // fragment already prefixed here and streams only the remainder as
+          // APPEND patches on response/fragments/<i>/content.
+          if (parsed?.v?.response) {
+            if (!sawSnapshot) {
+              sawSnapshot = true;
+              const frags = parsed.v.response.fragments;
+              for (const frag of Array.isArray(frags) ? frags : []) {
+                const index = fragmentTypes.length;
+                fragmentTypes.push(frag?.type);
+                const event = typeof frag?.content === 'string' ? emitFragment(index, frag.type, frag.content) : null;
+                if (event) yield event;
+              }
+            }
+            continue;
+          }
+
+          // `event: hint` reports server-side refusals, e.g. when requests come too fast:
+          // {"type":"error","content":"Messages too frequent...","finish_reason":"rate_limit_reached"}
+          if (parsed?.type === 'error' && typeof parsed.content === 'string') {
+            const code = parsed.finish_reason === 'rate_limit_reached' ? 'upstream_rate_limit' : parsed.finish_reason;
+            yield { type: 'error', message: `DeepSeek: ${parsed.content}`, code };
+            continue;
+          }
 
           const path = parsed.p ?? lastPath;
           if (parsed.p) lastPath = parsed.p;
           const value = parsed.v;
+          const op = parsed.o as string | undefined;
 
-          if (path === 'response/content' && typeof value === 'string' && value.length > 0) {
+          const fragmentContent = /^response\/fragments\/(-?\d+)\/content$/.exec(path);
+          if (path === 'response/fragments' && Array.isArray(value)) {
+            for (const frag of value) {
+              const index = fragmentTypes.length;
+              fragmentTypes.push(frag?.type);
+              const event = typeof frag?.content === 'string' ? emitFragment(index, frag.type, frag.content, op) : null;
+              if (event) yield event;
+            }
+          } else if (fragmentContent && typeof value === 'string' && value.length > 0) {
+            const raw = Number(fragmentContent[1]);
+            const index = raw < 0 ? fragmentTypes.length + raw : raw;
+            const event = emitFragment(index, fragmentTypes.at(raw), value, op);
+            if (event) yield event;
+          } else if (path === 'response/content' && typeof value === 'string' && value.length > 0) {
             yield { type: 'text_delta', delta: value };
           } else if (path === 'response/thinking_content' && typeof value === 'string' && value.length > 0) {
             yield { type: 'thinking_delta', delta: value };

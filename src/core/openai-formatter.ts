@@ -87,6 +87,10 @@ interface ModelsResponse {
     object: 'model';
     created: number;
     owned_by: string;
+    // Claude Code reads these to size its context bar and auto-compact
+    // (same field names as the real Models API); without them it guesses.
+    max_input_tokens: number;
+    max_tokens: number;
   }>;
 }
 
@@ -101,6 +105,8 @@ export function formatModelsResponse(
       object: 'model' as const,
       created: now,
       owned_by: 'web-model-bridge',
+      max_input_tokens: m.contextWindow,
+      max_tokens: m.maxOutput,
     })),
   };
 }

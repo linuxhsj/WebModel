@@ -12,6 +12,9 @@ export interface ProviderStatus {
 export class ProviderRegistry {
   private providers = new Map<string, BaseProvider>();
 
+  /** `fallbackModel` serves ids no provider has, e.g. Claude Code subagents asking for claude-sonnet-5-5. */
+  constructor(private readonly fallbackModel: string | null = null) {}
+
   register(provider: BaseProvider): void {
     this.providers.set(provider.info.id, provider);
   }
@@ -39,6 +42,10 @@ export class ProviderRegistry {
       }
     }
 
+    if (this.fallbackModel && modelId !== this.fallbackModel) {
+      console.warn(`[registry] ${new Date().toISOString()} unknown model "${modelId}", using fallback ${this.fallbackModel}`);
+      return this.resolve(this.fallbackModel);
+    }
     throw new InvalidModelError(modelId);
   }
 
