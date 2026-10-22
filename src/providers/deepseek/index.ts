@@ -2,6 +2,7 @@ import { BaseProvider, type ProviderInfo, type ModelInfo, type ChatRequest, buil
 import type { StreamEvent } from '../../core/stream.js';
 
 import { solvePow, buildPowResponse, type DeepSeekPowChallenge } from './pow.js';
+import { DeepSeekWebSSEParser } from './stream.js';
 import { DEEPSEEK_WEB_BASE_URL } from './client.js';
 import { AuthStore } from '../../auth/store.js';
 import type { Page } from 'playwright-core';
@@ -105,7 +106,14 @@ export class DeepSeekProvider extends BaseProvider {
             return { error: `HTTP ${res.status}: ${text.substring(0, 200)}` };
           }
           const data = await res.json();
-          return { sessionId: data?.data?.biz_data?.id || data?.data?.id };
+          // The web API has moved the session id to data.biz_data.chat_session.id;
+          // keep the older shapes as fallbacks.
+          return {
+            sessionId:
+              data?.data?.biz_data?.chat_session?.id ||
+              data?.data?.biz_data?.id ||
+              data?.data?.id,
+          };
         } catch (e: any) {
           return { error: e.message };
         }
@@ -214,44 +222,9 @@ export class DeepSeekProvider extends BaseProvider {
         return;
       }
 
-
-      // Step 7: Parse SSE
-      // DeepSeek Web uses a JSON-patch SSE format:
-      //   {"p":"response/content","o":"APPEND","v":"Hello"} — append to content
-      //   {"v":"!"} — short form append (continues previous path)
-      //   {"p":"response/status","v":"FINISHED"} — status update
-      //   {"p":"response/thinking_content","o":"APPEND","v":"..."} — thinking
-      const lines = (sseResult.data ?? '').split('\n');
-      let lastPath = '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('event:')) continue;
-        if (!trimmed.startsWith('data: ')) continue;
-
-        const raw = trimmed.slice(6);
-        if (raw === '[DONE]' || raw === '{}') continue;
-
-        try {
-          const parsed = JSON.parse(raw);
-
-          // Full response object (initial WIP state) — skip, wait for patches
-          if (parsed?.v?.response) continue;
-
-          const path = parsed.p ?? lastPath;
-          if (parsed.p) lastPath = parsed.p;
-          const value = parsed.v;
-
-          if (path === 'response/content' && typeof value === 'string' && value.length > 0) {
-            yield { type: 'text_delta', delta: value };
-          } else if (path === 'response/thinking_content' && typeof value === 'string' && value.length > 0) {
-            yield { type: 'thinking_delta', delta: value };
-          } else if (path === 'response/status' && (value === 'FINISHED' || value === 'DONE')) {
-            yield { type: 'done', reason: 'stop' };
-          }
-        } catch {
-          // Skip non-JSON lines
-        }
-      }
+      // Step 7: Parse SSE (protocol details live in ./stream.ts)
+      const parser = new DeepSeekWebSSEParser();
+      yield* parser.pushText(sseResult.data ?? '');
 
     } catch (err) {
       yield { type: 'error', message: `DeepSeek provider error: ${(err as Error).message}` };
